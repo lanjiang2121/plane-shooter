@@ -135,8 +135,9 @@
     </div>
 
     <div class="controls-hint">
-        <span>↑↓←→</span> 或 <span>W A S D</span> 移动 &nbsp;|&nbsp;
-        <span>空格</span> 开始 / 跳过 &nbsp;|&nbsp;
+        <span>↑↓←→</span> / <span>WASD</span> 移动 &nbsp;|&nbsp;
+        <span>空格</span> 开始 &nbsp;|&nbsp;
+        <span>ESC</span> 关闭弹窗 &nbsp;|&nbsp;
         自动射击
     </div>
 
@@ -166,6 +167,58 @@
         let shakeIntensity = 0;
         let flashAlpha = 0;
         let gameOverTimer = 0;         // 结束后自动返回标题的计时器
+
+        // ==================== 弹窗状态 ====================
+        let currentPopup = null; // 'instructions' | 'leaderboard' | 'contact'
+        let leaderboardData = [];
+        let leaderboardLoading = false;
+
+        // ==================== 排行榜功能 ====================
+        function saveScoreToLeaderboard(scoreValue) {
+            fetch('/api/leaderboard', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ score: scoreValue })
+            }).then(r => r.json()).then(data => {
+                console.log('分数已上传:', data);
+            }).catch(e => {
+                console.warn('上传分数失败，保存到本地:', e);
+                saveScoreLocal(scoreValue);
+            });
+        }
+
+        function saveScoreLocal(scoreValue) {
+            let localScores = [];
+            try { localScores = JSON.parse(localStorage.getItem('leaderboard') || '[]'); } catch(e) {}
+            localScores.push({ score: scoreValue, date: new Date().toISOString() });
+            localScores.sort(function(a, b) { return b.score - a.score; });
+            localScores = localScores.slice(0, 50);
+            localStorage.setItem('leaderboard', JSON.stringify(localScores));
+        }
+
+        function loadLeaderboard(callback) {
+            leaderboardLoading = true;
+            fetch('/api/leaderboard')
+                .then(r => r.json())
+                .then(data => {
+                    leaderboardData = data || [];
+                    leaderboardLoading = false;
+                    if (callback) callback(leaderboardData);
+                })
+                .catch(() => {
+                    loadLeaderboardLocal(callback);
+                });
+        }
+
+        function loadLeaderboardLocal(callback) {
+            try {
+                leaderboardData = JSON.parse(localStorage.getItem('leaderboard') || '[]');
+            } catch(e) {
+                leaderboardData = [];
+            }
+            leaderboardLoading = false;
+            if (callback) callback(leaderboardData);
+        }
 
         // ==================== 音频系统 ====================
         let audioCtx = null;
@@ -333,14 +386,59 @@
             musicPlaying = false;
         }
 
+        // ==================== 按钮区域定义 ====================
+        const BTN_W = 200;
+        const BTN_H = 68;
+        const BTN_GAP = 16;
+        const BTN_X = W / 2;
+        const BTN_START_Y = 300;
+
+        function getButtonRect(index) {
+            return {
+                x: BTN_X - BTN_W / 2,
+                y: BTN_START_Y + index * (BTN_H + BTN_GAP),
+                w: BTN_W,
+                h: BTN_H
+            };
+        }
+
+        function pointInRect(px, py, rect) {
+            return px >= rect.x && px <= rect.x + rect.w &&
+                   py >= rect.y && py <= rect.y + rect.h;
+        }
+
+        function getInputPos(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = W / rect.width, sy = H / rect.height;
+            return {
+                x: (clientX - rect.left) * sx,
+                y: (clientY - rect.top) * sy
+            };
+        }
+
         // ==================== 输入处理 ====================
         const keys = {};
         window.addEventListener('keydown', e => {
             keys[e.key] = true;
+
+            // ESC 关闭弹窗
+            if (e.key === 'Escape') {
+                if (currentPopup) {
+                    currentPopup = null;
+                    return;
+                }
+            }
+
             if (e.key === ' ' || e.key === 'Spacebar') {
                 e.preventDefault();
-                if (gameState === STATE.IDLE || gameState === STATE.OVER) {
+                if (currentPopup) return;
+                if (gameState === STATE.IDLE) {
                     startGame();
+                    return;
+                }
+                if (gameState === STATE.OVER) {
+                    startGame();
+                    return;
                 }
             }
             if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.preventDefault();
@@ -351,36 +449,111 @@
         let touchX = null, touchY = null;
         canvas.addEventListener('touchstart', e => {
             e.preventDefault();
-            if (gameState === STATE.IDLE || gameState === STATE.OVER) { startGame(); return; }
-            const rect = canvas.getBoundingClientRect();
-            const sx = W / rect.width, sy = H / rect.height;
-            touchX = (e.touches[0].clientX - rect.left) * sx;
-            touchY = (e.touches[0].clientY - rect.top) * sy;
+            const pos = getInputPos(e.touches[0].clientX, e.touches[0].clientY);
+
+            // ----- 弹窗状态：检查关闭按钮 -----
+            if (currentPopup) {
+                const popupRect = getPopupRect();
+                const closeBtn = {
+                    x: popupRect.x + popupRect.w - 38,
+                    y: popupRect.y + 6,
+                    w: 32,
+                    h: 32
+                };
+                if (pointInRect(pos.x, pos.y, closeBtn)) {
+                    currentPopup = null;
+                    return;
+                }
+                if (!pointInRect(pos.x, pos.y, popupRect)) {
+                    currentPopup = null;
+                    return;
+                }
+                return;
+            }
+
+            // ----- 空闲状态：仅响应按钮点击，空白区域不开始游戏 -----
+            if (gameState === STATE.IDLE) {
+                if (pointInRect(pos.x, pos.y, getButtonRect(0))) { startGame(); return; }
+                if (pointInRect(pos.x, pos.y, getButtonRect(1))) { currentPopup = 'instructions'; return; }
+                if (pointInRect(pos.x, pos.y, getButtonRect(2))) {
+                    currentPopup = 'leaderboard';
+                    loadLeaderboard(function(data) { leaderboardData = data; });
+                    return;
+                }
+                if (pointInRect(pos.x, pos.y, getButtonRect(3))) { currentPopup = 'contact'; return; }
+                // 点击空白区域不做任何事
+                return;
+            }
+
+            if (gameState === STATE.OVER) { startGame(); return; }
+
+            touchX = pos.x; touchY = pos.y;
         });
         canvas.addEventListener('touchmove', e => {
             e.preventDefault();
-            const rect = canvas.getBoundingClientRect();
-            const sx = W / rect.width, sy = H / rect.height;
-            touchX = (e.touches[0].clientX - rect.left) * sx;
-            touchY = (e.touches[0].clientY - rect.top) * sy;
+            if (currentPopup || gameState !== STATE.PLAYING) return;
+            const pos = getInputPos(e.touches[0].clientX, e.touches[0].clientY);
+            touchX = pos.x; touchY = pos.y;
         });
         canvas.addEventListener('touchend', e => { e.preventDefault(); touchX = null; touchY = null; });
 
-        // 鼠标（仅按住拖动时控制飞机）
+        // 鼠标
         let mouseX = null, mouseY = null;
         let mouseDown = false;
-        canvas.addEventListener('mousedown', e => { mouseDown = true; });
+        canvas.addEventListener('mousedown', e => {
+            mouseDown = true;
+            const pos = getInputPos(e.clientX, e.clientY);
+
+            // ----- 弹窗状态 -----
+            if (currentPopup) {
+                const popupRect = getPopupRect();
+                const closeBtn = {
+                    x: popupRect.x + popupRect.w - 38,
+                    y: popupRect.y + 6,
+                    w: 32,
+                    h: 32
+                };
+                if (pointInRect(pos.x, pos.y, closeBtn)) {
+                    currentPopup = null;
+                    return;
+                }
+                if (!pointInRect(pos.x, pos.y, popupRect)) {
+                    currentPopup = null;
+                    return;
+                }
+                return;
+            }
+
+            // ----- 空闲状态：仅响应按钮点击 -----
+            if (gameState === STATE.IDLE) {
+                if (pointInRect(pos.x, pos.y, getButtonRect(0))) { startGame(); return; }
+                if (pointInRect(pos.x, pos.y, getButtonRect(1))) { currentPopup = 'instructions'; return; }
+                if (pointInRect(pos.x, pos.y, getButtonRect(2))) {
+                    currentPopup = 'leaderboard';
+                    loadLeaderboard(function(data) { leaderboardData = data; });
+                    return;
+                }
+                if (pointInRect(pos.x, pos.y, getButtonRect(3))) { currentPopup = 'contact'; return; }
+                // 点击空白区域不做任何事
+                return;
+            }
+
+            if (gameState === STATE.OVER) { startGame(); return; }
+
+            mouseX = pos.x; mouseY = pos.y;
+        });
         canvas.addEventListener('mouseup', e => { mouseDown = false; mouseX = null; mouseY = null; });
         canvas.addEventListener('mouseleave', e => { mouseDown = false; mouseX = null; mouseY = null; });
         canvas.addEventListener('mousemove', e => {
-            if (!mouseDown) return;
-            const rect = canvas.getBoundingClientRect();
-            const sx = W / rect.width, sy = H / rect.height;
-            mouseX = (e.clientX - rect.left) * sx;
-            mouseY = (e.clientY - rect.top) * sy;
+            if (!mouseDown || currentPopup) return;
+            if (gameState !== STATE.PLAYING) return;
+            const pos = getInputPos(e.clientX, e.clientY);
+            mouseX = pos.x; mouseY = pos.y;
         });
         canvas.addEventListener('click', e => {
-            if (gameState === STATE.IDLE || gameState === STATE.OVER) startGame();
+            if (currentPopup) return;
+            // 点击空白处：仅在结束画面时重新开始，菜单页必须点击按钮
+            if (gameState === STATE.OVER) startGame();
         });
 
         // ==================== 游戏对象 ====================
@@ -636,6 +809,10 @@
                 highScore = score;
                 localStorage.setItem('planeGameHighScore', highScore);
             }
+            // 保存分数到排行榜
+            if (score > 0) {
+                saveScoreToLeaderboard(score);
+            }
         }
 
         function shoot() {
@@ -761,6 +938,8 @@
                 e.y += e.speed;
                 e.wobble += e.wobbleSpeed;
                 e.x += Math.sin(e.wobble) * e.wobbleAmp;
+                // 边界碰撞：防止敌机飞出屏幕之外
+                e.x = Math.max(e.w / 2, Math.min(W - e.w / 2, e.x));
 
                 // 射击逻辑
                 if (e.canShoot && player && player.invincible <= 0 && e.y > 30 && e.y < H - 100) {
@@ -1248,351 +1427,453 @@
 
         function drawHUD() {
             ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 20px Arial';
+            ctx.font = 'bold 24px Arial';
             ctx.textAlign = 'left';
-            ctx.fillText('Score: ' + score.toLocaleString(), 18, 38);
+            ctx.fillText('Score: ' + score.toLocaleString(), 18, 40);
 
             ctx.fillStyle = '#aaccff';
-            ctx.font = '13px Arial';
-            ctx.fillText('Lv.' + level, 18, 58);
+            ctx.font = '15px Arial';
+            ctx.fillText('Lv.' + level, 18, 62);
 
             // 能量条（右上角）
             if (player) {
-                const barW = 90, barH = 6, barR = W - 20 - barW;
+                const barW = 95, barH = 8, barR = W - 20 - barW;
                 // 黄条
                 const yellowPct = Math.min(1, player.permBonus / 16);
                 ctx.fillStyle = 'rgba(0,0,0,0.6)';
-                ctx.fillRect(barR, 62, barW, barH);
+                ctx.fillRect(barR, 64, barW, barH);
                 const yg = ctx.createLinearGradient(barR, 0, barR + barW, 0);
                 yg.addColorStop(0, '#ffaa00'); yg.addColorStop(1, '#ffdd44');
                 ctx.fillStyle = yg;
-                ctx.fillRect(barR, 62, barW * yellowPct, barH);
+                ctx.fillRect(barR, 64, barW * yellowPct, barH);
                 ctx.strokeStyle = 'rgba(255,200,50,0.5)'; ctx.lineWidth = 1;
-                ctx.strokeRect(barR, 62, barW, barH);
+                ctx.strokeRect(barR, 64, barW, barH);
                 ctx.fillStyle = '#ffdd44';
-                ctx.font = '8px Arial'; ctx.textAlign = 'right';
-                ctx.fillText(Math.min(player.permBonus, 16) + '/' + 16, barR - 4, 68);
+                ctx.font = '10px Arial'; ctx.textAlign = 'right';
+                ctx.fillText(Math.min(player.permBonus, 16) + '/' + 16, barR - 4, 72);
 
                 // 红条（黄满后显示）
                 if (player.capTier >= 1) {
                     const redPct = Math.min(1, (player.permBonus - 16) / 16);
                     ctx.fillStyle = 'rgba(0,0,0,0.6)';
-                    ctx.fillRect(barR, 72, barW, barH);
+                    ctx.fillRect(barR, 76, barW, barH);
                     const rg = ctx.createLinearGradient(barR, 0, barR + barW, 0);
                     rg.addColorStop(0, '#ff3333'); rg.addColorStop(1, '#ff6644');
                     ctx.fillStyle = rg;
-                    ctx.fillRect(barR, 72, barW * redPct, barH);
+                    ctx.fillRect(barR, 76, barW * redPct, barH);
                     ctx.strokeStyle = 'rgba(255,100,80,0.5)'; ctx.lineWidth = 1;
-                    ctx.strokeRect(barR, 72, barW, barH);
+                    ctx.strokeRect(barR, 76, barW, barH);
                     ctx.fillStyle = '#ff6644';
-                    ctx.fillText(Math.min(player.permBonus - 16, 16) + '/' + 16, barR - 4, 78);
+                    ctx.fillText(Math.min(player.permBonus - 16, 16) + '/' + 16, barR - 4, 84);
                 }
             }
 
             ctx.textAlign = 'right';
             ctx.fillStyle = '#ff6666';
-            ctx.font = '20px Arial';
+            ctx.font = '24px Arial';
             let h = '';
             for (let i = 0; i < lives; i++) h += '♥ ';
-            ctx.fillText(h.trim(), W - 18, 38);
+            ctx.fillText(h.trim(), W - 18, 40);
 
             ctx.fillStyle = 'rgba(255,255,255,0.5)';
-            ctx.font = '11px Arial';
-            ctx.fillText('Best: ' + highScore.toLocaleString(), W - 18, 58);
+            ctx.font = '14px Arial';
+            ctx.fillText('Best: ' + highScore.toLocaleString(), W - 18, 62);
         }
 
         // ==================== 标题画面 ====================
+        function drawRoundRect(x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.lineTo(x + w - r, y);
+            ctx.arcTo(x + w, y, x + w, y + r, r);
+            ctx.lineTo(x + w, y + h - r);
+            ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+            ctx.lineTo(x + r, y + h);
+            ctx.arcTo(x, y + h, x, y + h - r, r);
+            ctx.lineTo(x, y + r);
+            ctx.arcTo(x, y, x + r, y, r);
+            ctx.closePath();
+        }
+
+        function drawBigButton(x, y, w, h, label, icon, color1, color2) {
+            // 按钮阴影
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            drawRoundRect(x + 2, y + 2, w, h, 14);
+            ctx.fill();
+
+            // 按钮主体渐变
+            const btnG = ctx.createLinearGradient(x, y, x, y + h);
+            btnG.addColorStop(0, color1);
+            btnG.addColorStop(1, color2);
+            ctx.fillStyle = btnG;
+            drawRoundRect(x, y, w, h, 14);
+            ctx.fill();
+
+            // 高光边
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 2;
+            drawRoundRect(x, y, w, h, 14);
+            ctx.stroke();
+
+            // 图标
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 28px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(icon, x + 44, y + h / 2);
+
+            // 文字
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, x + w / 2 + 10, y + h / 2);
+        }
+
         function drawStartScreen() {
-            // 遮罩
+            // 半透明遮罩
             ctx.fillStyle = 'rgba(0,0,0,0.72)';
             ctx.fillRect(0, 0, W, H);
 
-            // 标题 — 渐变 + 发光
-            const titleY = 62;
+            // ---- 游戏标题 ----
+            const titleY = 120;
             ctx.textAlign = 'center';
 
-            // 外层发光（多层叠加）
+            // 外层发光
             for (let i = 3; i >= 0; i--) {
                 const alpha = 0.08 + i * 0.06;
-                const blur = 6 + i * 8;
+                const blur = 5 + i * 7;
                 ctx.shadowColor = `rgba(100,180,255,${alpha})`;
                 ctx.shadowBlur = blur;
                 ctx.fillStyle = '#ffffff';
-                ctx.font = 'bold 46px Arial';
-                ctx.fillText('Plane Shooter', W / 2, titleY);
+                ctx.font = 'bold 66px Arial';
+                ctx.fillText('星焰战机', W / 2, titleY);
             }
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
 
-            // 标题主体 — 渐变色
-            const titleGrad = ctx.createLinearGradient(W/2 - 150, 0, W/2 + 150, 0);
+            // 标题主体渐变
+            const titleGrad = ctx.createLinearGradient(W/2 - 190, 0, W/2 + 190, 0);
             titleGrad.addColorStop(0, '#44aaff');
             titleGrad.addColorStop(0.3, '#aaddff');
             titleGrad.addColorStop(0.5, '#ffffff');
             titleGrad.addColorStop(0.7, '#aaddff');
             titleGrad.addColorStop(1, '#44aaff');
             ctx.fillStyle = titleGrad;
-            ctx.font = 'bold 46px Arial';
-            ctx.fillText('Plane Shooter', W / 2, titleY);
-
-            // 作者名
-            ctx.fillStyle = 'rgba(255,255,255,0.45)';
-            ctx.font = 'italic 13px Arial';
-            ctx.fillText('by 岚酱', W / 2, titleY + 30);
+            ctx.font = 'bold 66px Arial';
+            ctx.fillText('星焰战机', W / 2, titleY);
 
             // 副标题
-            ctx.fillStyle = '#aaccff';
-            ctx.font = '12px Arial';
-            ctx.fillText('--- 飞机大战 ---', W / 2, 112);
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = 'italic 15px Arial';
+            ctx.fillText('by 岚酱 · 无限太空射击', W / 2, titleY + 38);
 
             // 装饰线
-            const lg = ctx.createLinearGradient(W/2-130, 0, W/2+130, 0);
-            lg.addColorStop(0, 'rgba(100,150,255,0)');
-            lg.addColorStop(0.5, 'rgba(100,150,255,0.8)');
-            lg.addColorStop(1, 'rgba(100,150,255,0)');
-            ctx.strokeStyle = lg; ctx.lineWidth = 1.5;
+            const decoY = titleY + 64;
+            const dg = ctx.createLinearGradient(W/2-120, 0, W/2+120, 0);
+            dg.addColorStop(0, 'rgba(100,150,255,0)');
+            dg.addColorStop(0.5, 'rgba(100,150,255,0.7)');
+            dg.addColorStop(1, 'rgba(100,150,255,0)');
+            ctx.strokeStyle = dg; ctx.lineWidth = 1.5;
             ctx.beginPath();
-            ctx.moveTo(W/2-130, 122); ctx.lineTo(W/2+130, 122);
+            ctx.moveTo(W/2-120, decoY); ctx.lineTo(W/2+120, decoY);
             ctx.stroke();
 
-            // ---- 敌军图鉴 ----
-            const guideY = 142;
-            ctx.fillStyle = '#ff9944';
-            ctx.font = 'bold 14px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('--- 敌军图鉴 ---', W / 2, guideY);
-
-            // 辅助函数：画迷你敌机（与游戏中 drawEnemy 同款形状）
-            function drawMiniEnemy(cx, cy, type, color, size) {
-                const w = size, h = size;
-                const hex = color;
-                const r = parseInt(hex.slice(1,3),16);
-                const g = parseInt(hex.slice(3,5),16);
-                const b = parseInt(hex.slice(5,7),16);
-
-                // 光晕
-                const glowG = ctx.createRadialGradient(0, 0, w*0.3, 0, 0, w*0.8);
-                glowG.addColorStop(0, `rgba(${r},${g},${b},0.15)`);
-                glowG.addColorStop(1, 'rgba(255,0,0,0)');
-                ctx.fillStyle = glowG;
-                ctx.beginPath();
-                ctx.arc(cx, cy, w*0.8, 0, Math.PI*2);
-                ctx.fill();
-
-                ctx.save();
-                ctx.translate(cx, cy);
-
-                const dark = `rgb(${Math.floor(r*0.6)},${Math.floor(g*0.4)},${Math.floor(b*0.4)})`;
-                const bodyG = ctx.createLinearGradient(0, -h/2, 0, h/2);
-                bodyG.addColorStop(0, color);
-                bodyG.addColorStop(1, dark);
-                ctx.fillStyle = bodyG;
-
-                if (type === 'small' || type === 'shooter') {
-                    // 菱形 (与 game drawEnemy 一致)
-                    ctx.beginPath();
-                    ctx.moveTo(0, -h/2);
-                    ctx.lineTo(w/2, 0);
-                    ctx.lineTo(0, h/2);
-                    ctx.lineTo(-w/2, 0);
-                    ctx.closePath();
-                    ctx.fill();
-                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                    ctx.lineWidth = 0.8; ctx.stroke();
-
-                    if (type === 'shooter') {
-                        // 炮管
-                        ctx.fillStyle = '#ff88ff';
-                        ctx.fillRect(-1.5, h/2-2, 3, 6);
-                        ctx.fillStyle = '#ffffff';
-                        ctx.beginPath();
-                        ctx.arc(0, 0, 2.5, 0, Math.PI*2);
-                        ctx.fill();
-                    } else {
-                        ctx.fillStyle = '#ffdd44';
-                        ctx.beginPath();
-                        ctx.arc(0, 0, 2.5, 0, Math.PI*2);
-                        ctx.fill();
-                    }
-                } else if (type === 'medium') {
-                    // 战斗机形状
-                    ctx.beginPath();
-                    ctx.moveTo(0, -h/2);
-                    ctx.lineTo(w/2+3, -h/4);
-                    ctx.lineTo(w/2, h/4);
-                    ctx.lineTo(5, h/2);
-                    ctx.lineTo(-5, h/2);
-                    ctx.lineTo(-w/2, h/4);
-                    ctx.lineTo(-w/2-3, -h/4);
-                    ctx.closePath();
-                    ctx.fill();
-                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                    ctx.lineWidth = 1.2; ctx.stroke();
-                    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-                    ctx.fillRect(-w/3, -h/6, w*2/3, h/3);
-                } else {
-                    // 重型机形状
-                    ctx.beginPath();
-                    ctx.moveTo(0, -h/2);
-                    ctx.lineTo(w/2, -h/4);
-                    ctx.lineTo(w/2+5, 0);
-                    ctx.lineTo(w/2, h/4);
-                    ctx.lineTo(6, h/2);
-                    ctx.lineTo(-6, h/2);
-                    ctx.lineTo(-w/2, h/4);
-                    ctx.lineTo(-w/2-5, 0);
-                    ctx.lineTo(-w/2, -h/4);
-                    ctx.closePath();
-                    ctx.fill();
-                    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-                    ctx.lineWidth = 1.5; ctx.stroke();
-                    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-                    ctx.beginPath();
-                    ctx.arc(0, 0, w*0.33, 0, Math.PI*2);
-                    ctx.fill();
-                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-                    ctx.lineWidth = 0.8; ctx.stroke();
-                }
-
-                ctx.restore();
-            }
-
-            const enemyTypes = [
-                { type: 'small',  color: '#ff6666', hp: '1', name: '侦察机', desc: '最基础敌机 无攻击能力' },
-                { type: 'medium', color: '#ff9944', hp: '2', name: '战斗机',   desc: '中速移动 偶尔射击玩家' },
-                { type: 'large',  color: '#ff4444', hp: '4', name: '重型机',   desc: '高血量 会向玩家射击' },
-                { type: 'shooter',color: '#cc44ff', hp: '2', name: '炮击机',   desc: '紫色专属 射速相对较快' },
+            // ---- 四大按钮 ----
+            const buttons = [
+                { label: '无尽模式', icon: '🎮', color1: '#ff6b35', color2: '#c73e1d' },
+                { label: '玩法说明', icon: '📖', color1: '#4a90d9', color2: '#2563a0' },
+                { label: '排 行 榜', icon: '🏆', color1: '#f0a500', color2: '#b87a00' },
+                { label: '联系我们', icon: '📧', color1: '#6c5ce7', color2: '#4834d4' },
             ];
 
-            const col1X = 62, col2X = W / 2 + 16;
-            enemyTypes.forEach((et, i) => {
-                const row = Math.floor(i / 2);
-                const isLeft = i % 2 === 0;
-                const bx = isLeft ? col1X : col2X;
-                const by = guideY + 20 + row * 82;
-
-                // 背景框
-                ctx.fillStyle = 'rgba(0,0,0,0.45)';
-                ctx.strokeStyle = et.color;
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                ctx.roundRect(bx - 30, by, 190, 72, 7);
-                ctx.fill(); ctx.stroke();
-
-                // 迷你敌机（与游戏中一致）
-                drawMiniEnemy(bx - 4, by + 36, et.type, et.color, 24);
-
-                // 名称 + 属性
-                ctx.fillStyle = et.color;
-                ctx.font = 'bold 12px Arial';
-                ctx.textAlign = 'left';
-                ctx.fillText(et.name, bx + 24, by + 18);
-
-                ctx.fillStyle = '#cccccc';
-                ctx.font = '10px Arial';
-                ctx.fillText('HP: ' + et.hp, bx + 24, by + 35);
-
-                ctx.fillStyle = '#999999';
-                ctx.font = '9px Arial';
-                ctx.fillText(et.desc, bx + 24, by + 50);
+            buttons.forEach(function(btn, i) {
+                const rect = getButtonRect(i);
+                drawBigButton(rect.x, rect.y, rect.w, rect.h,
+                              btn.label, btn.icon, btn.color1, btn.color2);
             });
 
-            // ---- 道具说明 ----
-            const itemY = guideY + 24 + Math.ceil(enemyTypes.length / 2) * 82 + 10;
-            ctx.fillStyle = '#44aaff';
-            ctx.font = 'bold 14px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('--- 道具说明 ---', W / 2, itemY);
-
-            // 辅助函数：画迷你道具（与游戏中 drawPowerUp 一致）
-            function drawMiniPowerUp(cx, cy, color, sym, sz) {
-                const hex = color;
-                const r = parseInt(hex.slice(1,3),16);
-                const g = parseInt(hex.slice(3,5),16);
-                const b = parseInt(hex.slice(5,7),16);
-
-                // 外光环
-                const grd = ctx.createRadialGradient(cx, cy, sz*0.25, cx, cy, sz*0.75);
-                grd.addColorStop(0, `rgba(${r},${g},${b},0.3)`);
-                grd.addColorStop(1, 'rgba(0,0,0,0)');
-                ctx.fillStyle = grd;
-                ctx.beginPath();
-                ctx.arc(cx, cy, sz*0.75, 0, Math.PI*2);
-                ctx.fill();
-
-                // 实心圆
-                ctx.fillStyle = `rgba(${r},${g},${b},0.30)`;
-                ctx.strokeStyle = `rgba(${r},${g},${b},0.85)`;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.arc(cx, cy, sz/2, 0, Math.PI*2);
-                ctx.fill(); ctx.stroke();
-
-                // 图标文字
-                ctx.fillStyle = '#ffffff';
-                ctx.font = 'bold 12px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(sym, cx, cy);
-            }
-
-            const powerInfo = [
-                { color: '#44ff44', sym: '+',   name: '维修包',     desc: '回复 1 点生命 + 永久加成' },
-                { color: '#44aaff', sym: '>>',  name: '速射芯片',   desc: '14 秒射速飙升 + 永久提速' },
-                { color: '#ffaa44', sym: ':::', name: '散射模块',   desc: '后续 5 发变为扇形弹幕 + 永久提速' },
-                { color: '#ff66ff', sym: '|||', name: '多弹道模组', desc: '10 秒每次射击额外 2 发' },
-            ];
-
-            powerInfo.forEach((pi, i) => {
-                const py = itemY + 22 + i * 38;
-                const icX = W / 2 - 130;
-
-                // 迷你道具图标
-                drawMiniPowerUp(icX, py, pi.color, pi.sym, 22);
-
-                // 名称描述
-                ctx.fillStyle = pi.color;
-                ctx.font = 'bold 11px Arial';
-                ctx.textAlign = 'left';
-                ctx.fillText(pi.name, icX + 24, py - 5);
-
-                ctx.fillStyle = '#999999';
-                ctx.font = '10px Arial';
-                ctx.fillText(pi.desc, icX + 24, py + 11);
-            });
-
-            // ---- 玩法说明 ----
-            const rulesY = itemY + 22 + powerInfo.length * 38 + 10;
-            ctx.fillStyle = 'rgba(255,255,200,0.65)';
-            ctx.font = 'bold 11px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('--- 玩法说明 ---', W / 2, rulesY);
-
-            const rules = [
-                '每吃2个永久道具额外+1 叠16层黄条满弹道+1',
-                '黄满后叠红条 红条满弹道再+1且攻速锁8',
-                '受伤无顶-2 黄顶-6 红顶-10 进度不足降级减弹道',
-            ];
-            ctx.fillStyle = 'rgba(255,255,255,0.45)';
-            ctx.font = '9px Arial';
-            rules.forEach((t, i) => ctx.fillText(t, W / 2, rulesY + 16 + i * 14));
-
-            // ---- 操作说明 + 最高分 + 开始 ----
-            const ctrlY = rulesY + 16 + rules.length * 14 + 8;
-            ctx.fillStyle = 'rgba(255,255,255,0.45)';
-            ctx.font = '11px Arial';
-            ctx.fillText('方向键 / WASD 移动 · 自动射击', W / 2, ctrlY);
-
+            // 底部提示
+            const hintY = BTN_START_Y + buttons.length * (BTN_H + BTN_GAP) + 16;
             if (highScore > 0) {
                 ctx.fillStyle = '#ffdd44';
-                ctx.font = 'bold 12px Arial';
-                ctx.fillText('Best: ' + highScore.toLocaleString(), W / 2, ctrlY + 18);
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('🏅 历史最高: ' + highScore.toLocaleString(), W / 2, hintY);
             }
 
             const blink = 0.5 + Math.sin(Date.now() / 600) * 0.5;
             ctx.fillStyle = `rgba(255,255,255,${blink})`;
-            ctx.font = 'bold 16px Arial';
-            ctx.fillText('[ 按空格键 或 点击屏幕 开始 ]', W / 2, ctrlY + 40);
+            ctx.font = 'bold 15px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('点击按钮开始，方向键/WASD/拖动飞机战斗', W / 2, hintY + 26);
+        }
+
+        // ==================== 弹窗渲染 ====================
+        function getPopupRect() {
+            const popupW = 370;
+            const popupH = 420;
+            return {
+                x: (W - popupW) / 2,
+                y: (H - popupH) / 2 - 20,
+                w: popupW,
+                h: popupH
+            };
+        }
+
+        function drawPopupOverlay() {
+            ctx.fillStyle = 'rgba(0,0,0,0.65)';
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        function drawPopupWindow(title, contentHeight) {
+            const rect = getPopupRect();
+            rect.h = contentHeight;
+
+            // 弹窗背景
+            ctx.fillStyle = 'rgba(20,25,45,0.96)';
+            ctx.strokeStyle = 'rgba(100,160,255,0.6)';
+            ctx.lineWidth = 2;
+            drawRoundRect(rect.x, rect.y, rect.w, rect.h, 16);
+            ctx.fill();
+            ctx.stroke();
+
+            // 顶部装饰线
+            const topG = ctx.createLinearGradient(rect.x, 0, rect.x + rect.w, 0);
+            topG.addColorStop(0, 'rgba(100,160,255,0)');
+            topG.addColorStop(0.3, 'rgba(100,180,255,0.8)');
+            topG.addColorStop(0.5, 'rgba(150,200,255,0.9)');
+            topG.addColorStop(0.7, 'rgba(100,180,255,0.8)');
+            topG.addColorStop(1, 'rgba(100,160,255,0)');
+            ctx.strokeStyle = topG;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(rect.x + 12, rect.y + 4);
+            ctx.lineTo(rect.x + rect.w - 12, rect.y + 4);
+            ctx.stroke();
+
+            // 标题
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(title, rect.x + rect.w / 2, rect.y + 40);
+
+            // 关闭按钮
+            const closeX = rect.x + rect.w - 30;
+            const closeY = rect.y + 18;
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '26px Arial';
+            ctx.fillText('✕', closeX, closeY);
+
+            return rect;
+        }
+
+        function drawInstructionsPopup() {
+            drawPopupOverlay();
+            const rect = drawPopupWindow('📖 玩法说明', 580);
+
+            const startY = rect.y + 66;
+            const lineH = 22;
+            const gapH = 12;
+
+            // ---- 基本操作 ----
+            ctx.fillStyle = '#ffdd44';
+            ctx.font = 'bold 14px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText('▸ 基本操作', rect.x + 24, startY);
+
+            const opRules = [
+                '🎯 触摸屏幕 / 鼠标拖动 / 方向键 WASD 移动飞机',
+                '🔫 自动射击，无需手动开火',
+            ];
+            ctx.fillStyle = '#cccccc';
+            ctx.font = '13px Arial';
+            opRules.forEach(function(r, i) {
+                ctx.fillText(r, rect.x + 34, startY + 18 + i * lineH);
+            });
+
+            // ---- 敌军图鉴 ----
+            const enemyY = startY + 18 + opRules.length * lineH + gapH;
+            ctx.fillStyle = '#ff9944';
+            ctx.font = 'bold 14px Arial';
+            ctx.fillText('▸ 敌军图鉴', rect.x + 24, enemyY);
+
+            const enemyList = [
+                '🔺 侦察机（红）HP:1 · 无攻击 · 基础单位',
+                '🔸 战斗机（橙）HP:2 · 会射击 · 中速移动',
+                '🔴 重型机（深红）HP:4 · 会射击 · 高血量',
+                '🟣 炮击机（紫）HP:2 · 射速快 · 专属紫色',
+            ];
+            ctx.fillStyle = '#cccccc';
+            ctx.font = '13px Arial';
+            enemyList.forEach(function(r, i) {
+                ctx.fillText(r, rect.x + 34, enemyY + 18 + i * lineH);
+            });
+
+            // ---- 掉落物与道具 ----
+            const dropY = enemyY + 18 + enemyList.length * lineH + gapH;
+            ctx.fillStyle = '#44aaff';
+            ctx.font = 'bold 14px Arial';
+            ctx.fillText('▸ 掉落物与道具（击毁敌机概率掉落）', rect.x + 24, dropY);
+
+            const dropList = [
+                '🟢 维修包 · 回复1点生命 + 永久攻速加成',
+                '🔵 速射芯片 · 14秒射速飙升 + 永久攻速加成',
+                '🟠 散射模块 · 后续5发扇形弹幕 + 永久加成',
+                '🟣 多弹道模组 · 10秒每次射击额外2发子弹',
+            ];
+            ctx.fillStyle = '#cccccc';
+            ctx.font = '13px Arial';
+            dropList.forEach(function(r, i) {
+                ctx.fillText(r, rect.x + 34, dropY + 18 + i * lineH);
+            });
+
+            // ---- 成长机制 ----
+            const growY = dropY + 18 + dropList.length * lineH + gapH;
+            ctx.fillStyle = '#ff6644';
+            ctx.font = 'bold 14px Arial';
+            ctx.fillText('▸ 永久成长机制', rect.x + 24, growY);
+
+            const growList = [
+                '⭐ 每拾取2个道具永久+1层攻速 · 黄条叠满16层→弹道+1',
+                '🔴 黄条满后叠红条 · 红条满16层→弹道再+1且攻速锁顶',
+                '💔 受伤损失进度：无顶-2 / 黄顶-6 / 红顶-10 · 不足降级',
+            ];
+            ctx.fillStyle = '#cccccc';
+            ctx.font = '13px Arial';
+            growList.forEach(function(r, i) {
+                ctx.fillText(r, rect.x + 34, growY + 18 + i * lineH);
+            });
+
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = '13px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('点击弹窗外区域或按 ESC 关闭', rect.x + rect.w / 2, rect.y + rect.h - 14);
+        }
+
+        function drawLeaderboardPopup() {
+            drawPopupOverlay();
+            const rect = drawPopupWindow('🏆 排行榜 TOP 10', 430);
+
+            const startY = rect.y + 66;
+            const lineH = 30;
+
+            if (leaderboardLoading) {
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.font = '15px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('加载中...', rect.x + rect.w / 2, startY + 40);
+            } else if (leaderboardData.length === 0) {
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = '15px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('暂无排行数据，快来挑战吧！', rect.x + rect.w / 2, startY + 40);
+            } else {
+                // 表头
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = '13px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText('排名', rect.x + 32, startY);
+                ctx.textAlign = 'center';
+                ctx.fillText('分数', rect.x + rect.w / 2, startY);
+                ctx.textAlign = 'right';
+                ctx.fillText('时间', rect.x + rect.w - 32, startY);
+
+                // 分割线
+                ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(rect.x + 25, startY + 8);
+                ctx.lineTo(rect.x + rect.w - 25, startY + 8);
+                ctx.stroke();
+
+                leaderboardData.forEach(function(entry, i) {
+                    const y = startY + 22 + i * lineH;
+                    const rank = i + 1;
+
+                    let rankColor = '#ffffff';
+                    if (rank === 1) rankColor = '#ffd700';
+                    else if (rank === 2) rankColor = '#c0c0c0';
+                    else if (rank === 3) rankColor = '#cd7f32';
+
+                    if (rank <= 3) {
+                        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+                        drawRoundRect(rect.x + 16, y - 4, rect.w - 32, lineH - 2, 6);
+                        ctx.fill();
+                    }
+
+                    ctx.fillStyle = rankColor;
+                    ctx.font = 'bold 16px Arial';
+                    ctx.textAlign = 'left';
+                    const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '  ';
+                    ctx.fillText(medal + ' ' + rank, rect.x + 30, y + 8);
+
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText((entry.score || 0).toLocaleString(), rect.x + rect.w / 2, y + 8);
+
+                    let dateStr = '';
+                    if (entry.date) {
+                        try {
+                            const d = new Date(entry.date);
+                            dateStr = (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+                                      String(d.getHours()).padStart(2, '0') + ':' +
+                                      String(d.getMinutes()).padStart(2, '0');
+                        } catch(e) { dateStr = ''; }
+                    }
+
+                    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                    ctx.font = '13px Arial';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(dateStr, rect.x + rect.w - 32, y + 8);
+                });
+            }
+
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = '13px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('点击弹窗外区域或按 ESC 关闭', rect.x + rect.w / 2, rect.y + rect.h - 14);
+        }
+
+        function drawContactPopup() {
+            drawPopupOverlay();
+            const rect = drawPopupWindow('📧 联系我们', 300);
+
+            const startY = rect.y + 72;
+            const lineH = 56;
+
+            const contacts = [
+                { icon: '🐧', label: '作者QQ', value: '1320488698' },
+                { icon: '📧', label: '作者邮箱', value: 'lanjiang721@163.com' },
+                { icon: '💬', label: '反馈建议', value: '欢迎加好友交流反馈' },
+            ];
+
+            contacts.forEach(function(c, i) {
+                const y = startY + i * lineH;
+
+                // 卡片背景
+                ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                drawRoundRect(rect.x + 20, y - 2, rect.w - 40, lineH - 6, 8);
+                ctx.fill();
+
+                // 图标 + 标签
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.font = 'bold 14px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText(c.icon + ' ' + c.label, rect.x + 36, y + 16);
+
+                // 值（与标签同一水平线）
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'right';
+                ctx.fillText(c.value, rect.x + rect.w - 36, y + 16);
+            });
+
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = '13px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('点击弹窗外区域或按 ESC 关闭', rect.x + rect.w / 2, rect.y + rect.h - 14);
         }
 
         // ==================== 结束画面 ====================
@@ -1601,28 +1882,28 @@
             ctx.fillRect(0, 0, W, H);
 
             ctx.fillStyle = '#ff6644';
-            ctx.font = 'bold 38px Arial';
+            ctx.font = 'bold 44px Arial';
             ctx.textAlign = 'center';
             ctx.fillText('GAME OVER', W / 2, H / 2 - 65);
 
             ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 26px Arial';
+            ctx.font = 'bold 30px Arial';
             ctx.fillText('Score: ' + score.toLocaleString(), W / 2, H / 2 - 15);
 
             if (score >= highScore && score > 0) {
                 const glow = Math.sin(Date.now() / 300) * 0.3 + 0.7;
                 ctx.fillStyle = `rgba(255,220,50,${glow})`;
-                ctx.font = 'bold 18px Arial';
+                ctx.font = 'bold 22px Arial';
                 ctx.fillText('NEW HIGH SCORE!', W / 2, H / 2 + 20);
             } else {
                 ctx.fillStyle = 'rgba(255,255,255,0.5)';
-                ctx.font = '14px Arial';
+                ctx.font = '16px Arial';
                 ctx.fillText('Best: ' + highScore.toLocaleString(), W / 2, H / 2 + 20);
             }
 
             // 倒计时条
             const barW = 200;
-            const barH = 4;
+            const barH = 5;
             const barX = W / 2 - barW / 2;
             const barY = H / 2 + 48;
             const progress = gameOverTimer / 240;
@@ -1632,13 +1913,13 @@
             ctx.fillRect(barX, barY, barW * progress, barH);
 
             ctx.fillStyle = 'rgba(255,255,255,0.5)';
-            ctx.font = '11px Arial';
+            ctx.font = '13px Arial';
             ctx.fillText(Math.ceil(gameOverTimer / 60) + 's 后返回标题', W / 2, barY + 18);
 
             const blink = 0.5 + Math.sin(Date.now() / 500) * 0.5;
             ctx.fillStyle = `rgba(255,255,255,${blink})`;
-            ctx.font = 'bold 15px Arial';
-            ctx.fillText('按空格键立即重来', W / 2, barY + 36);
+            ctx.font = 'bold 18px Arial';
+            ctx.fillText('按空格键立即重来', W / 2, barY + 38);
         }
 
         // ==================== 主场渲染 ====================
@@ -1675,6 +1956,11 @@
 
             if (gameState === STATE.IDLE) drawStartScreen();
             if (gameState === STATE.OVER) drawGameOverScreen();
+
+            // 弹窗渲染（最上层）
+            if (currentPopup === 'instructions') drawInstructionsPopup();
+            if (currentPopup === 'leaderboard') drawLeaderboardPopup();
+            if (currentPopup === 'contact') drawContactPopup();
         }
 
         // ==================== 游戏循环 ====================
@@ -1688,9 +1974,8 @@
         initStars();
         gameLoop();
 
-        console.log('Plane Shooter ready!');
-        console.log('Controls: Arrow keys / WASD to move');
-        console.log('Press SPACE or click to start');
+        console.log('星焰战机 ready!');
+        console.log('Controls: Arrow keys / WASD to move, SPACE to start, ESC to close popup');
     })();
     </script>
 </body>
