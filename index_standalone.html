@@ -1086,10 +1086,10 @@
                     break;
                 case 'rapid':
                     if (player) {
-                        player.tempBuff = 12;
+                        player.tempBuff = 9;
                         recomputeInterval();
                     }
-                    addPermBonus(1);  // 永久加成立即生效，不再延迟
+                    addPermBonus(1);  // 永久加成立即生效
                     spawnExplosion(p.x, p.y, '#44aaff', 15);
                     setTimeout(() => {
                         if (player) {
